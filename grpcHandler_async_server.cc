@@ -11,9 +11,11 @@
 
 #include <grpc++/grpc++.h>
 #include <grpc/support/log.h>
+#include <grpcpp/alarm.h>
 
 #include "grpcHandler.grpc.pb.h"
 
+using grpc::Alarm;
 using grpc::Server;
 using grpc::ServerAsyncReaderWriter;
 using grpc::ServerAsyncResponseWriter;
@@ -30,14 +32,15 @@ int g_thread_num = 1;
 int g_cq_num = 1;
 int g_pool = 1;
 int g_port = 50051;
+int hoPrepCount = 0;
 
 class NdrBidi;
 
 std::atomic<void *> **g_instance_pool = nullptr;
 // queue of ho preps to process and release <tag, message>
-std::queue<pair<void*,std::string>> globalQueue;
+std::queue<pair<void *, std::string>> globalQueue;
 // map of all bidis
-unordered_map<void*, NdrBidi *> hashMap;
+unordered_map<void *, NdrBidi *> hashMap;
 
 class CallDataBase
 {
@@ -88,22 +91,20 @@ public:
 
   void Proceed(bool ok)
   {
-
     std::unique_lock<std::mutex> _wlock(this->m_mutex);
-
     switch (status_)
     {
     case NdrStatus::CONNECT:
       std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " connected:" << std::endl;
       // add to the hashmap, so its localQueue can be accessed by the main threaf
-      hashMap[(void*)this] = new NdrBidi(service_, cq_);
+      hashMap[(void *)this] = new NdrBidi(service_, cq_);
       rw_.Read(&request_, (void *)this);
       status_ = NdrStatus::READ;
       break;
 
     case NdrStatus::READ:
-
-      //Meaning client said it wants to end the stream either by a 'writedone' or 'finish' call.
+      // TODO remove this?
+      // Meaning client said it wants to end the stream either by a 'writedone' or 'finish' call.
       if (!ok)
       {
         std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " CQ returned false." << std::endl;
@@ -115,41 +116,55 @@ public:
       }
 
       std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " Read a new message:" << request_.message() << std::endl;
-
-      reply_.set_message("NDR DONE");
-      rw_.Write(reply_, (void *)this);
-      status_ = NdrStatus::WRITE;
-
-      // TODO add random number
-      // this simulates the generation of an HO PREP
-      globalQueue.push({(void *)this, "HO PREP"});
-      break;
-
-    case NdrStatus::WRITE:
-      std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " Written a message:" << reply_.message() << std::endl;
-      
-      // check if other messages need to be sent
-      if (!localQueue.empty())
+      if (request_.message() == "WRITES_DONE")
       {
-         // send a message from the queue
-         reply_.set_message(localQueue.front());
-         localQueue.pop();
-         rw_.Write(reply_, (void *)this);
-         i++;
-      } 
-      else if (reply_.message() == "WRITING DONE")
-      {
-         // listen for next message from client
-         rw_.Read(&request_, (void *)this);
-         status_ = NdrStatus::READ;
+        status_ = NdrStatus::WRITE;
+        usleep(500);
+        PutTaskBackToQueue();
       }
       else
       {
-         // notify the client that the server is done sending
-         reply_.set_message("WRITING DONE");
-         rw_.Write(reply_, (void *)this);
-         i++;
+        // simulate the generation of responses
+        // TODO make variable number of responses
+        globalQueue.push({(void *)this, "HO PREP"});
+        hoPrepCount++;
+        std::cout << "HO Prep Count incremented:" << hoPrepCount << std::endl;
+        //localQueue.push("HO PREP");
+        // continue reading from the client
+        rw_.Read(&request_, (void *)this);
       }
+      // reply_.set_message("NDR DONE");
+      // rw_.Write(reply_, (void *)this);
+      // status_ = NdrStatus::WRITE;
+      break;
+
+    case NdrStatus::WRITE:
+      std::cout << "   WRITE" << std::endl;
+      // check if other messages need to be sent
+      if (!localQueue.empty())
+      {
+        // send a message from the queue
+        //std::cout << "   Writing message " << localQueue.front() << std::endl;
+        hoPrepCount--;
+        std::cout << "HO Prep Count decremented:" << hoPrepCount << std::endl;
+        reply_.set_message(localQueue.front());
+        localQueue.pop();
+        rw_.Write(reply_, (void *)this);
+      }
+      else
+      {
+        // notify the client that the server is done sending
+        reply_.set_message("WRITES_DONE");
+        status_ = NdrStatus::WRITES_DONE;
+        rw_.Write(reply_, (void *)this);
+      }
+      break;
+
+    case NdrStatus::WRITES_DONE:
+      std::cout << "   WRITES_DONE" << std::endl;
+      // read messages from the client
+      status_ = NdrStatus::READ;
+      rw_.Read(&request_, (void *)this);
       break;
 
     case NdrStatus::DONE:
@@ -180,13 +195,20 @@ private:
     READ = 1,
     WRITE = 2,
     CONNECT = 3,
-    DONE = 4,
-    FINISH = 5
+    WRITES_DONE = 4,
+    DONE = 5,
+    FINISH = 6
   };
   NdrStatus status_;
 
-  // tracks the number of HO PREPS sent by this serverContext
-  int i = 0;
+  // alarm used to put tasks to the back of the completion queue
+  std::unique_ptr<Alarm> alarm_;
+
+  void PutTaskBackToQueue()
+  {
+    alarm_.reset(new Alarm);
+    alarm_->Set(cq_, gpr_now(gpr_clock_type::GPR_CLOCK_REALTIME), this);
+  }
 
   std::mutex m_mutex;
 };
@@ -197,6 +219,7 @@ public:
   ~ServerImpl()
   {
     server_->Shutdown();
+
     // Always shutdown the completion queue after the server.
     for (const auto &_cq : m_cq)
       _cq->Shutdown();
@@ -218,7 +241,7 @@ public:
 
     for (int i = 0; i < g_cq_num; ++i)
     {
-      //cq_ = builder.AddCompletionQueue();
+      // cq_ = builder.AddCompletionQueue();
       m_cq.emplace_back(builder.AddCompletionQueue());
     }
 
@@ -246,18 +269,19 @@ public:
     // listen to global queue for messages to appear
     while (true)
     {
-       if (!globalQueue.empty())
-       {
-         // process for 1 second
-         std::cout << "  Processing message: " << globalQueue.front().second << " from tag: " << globalQueue.front().first << std::endl;
-         usleep(100);
+      if (!globalQueue.empty())
+      {
+        // process for 1/2 second
+        //usleep(500);
+        std::cout << "   Finished processing message: " << globalQueue.front().second << " from tag: " << globalQueue.front().first << std::endl;
 
-         // add this message to this bidi's local queue
-         hashMap[globalQueue.front().first]->localQueue.push(globalQueue.front().second);
+        // add this message to this bidi's local queue
+        hashMap[globalQueue.front().first]->localQueue.push(globalQueue.front().second);
+        std::cout << "   Local Queue tag: " << globalQueue.front().first << " Size : " << hashMap[globalQueue.front().first]->localQueue.size() << std::endl;
 
-         // remove from global queue
-         globalQueue.pop();
-       }
+        // remove from global queue
+        globalQueue.pop();
+      }
     }
 
     for (const auto &_t : _vec_threads)
@@ -280,7 +304,7 @@ private:
       // memory address of a NdrBidi instance.
       // The return value of Next should always be checked. This return value
       // tells us whether there is any kind of event or cq_ is shutting down.
-      //GPR_ASSERT(cq_->Next(&tag, &ok));
+      // GPR_ASSERT(cq_->Next(&tag, &ok));
       GPR_ASSERT(m_cq[cq_idx]->Next(&tag, &ok));
 
       CallDataBase *_p_ins = (CallDataBase *)tag;
