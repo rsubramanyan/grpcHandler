@@ -1,3 +1,4 @@
+#include <unistd.h>
 #include <memory>
 #include <iostream>
 #include <string>
@@ -5,6 +6,8 @@
 #include <vector>
 #include <random>
 #include <atomic>
+#include <unordered_map>
+#include <queue>
 
 #include <grpc++/grpc++.h>
 #include <grpc/support/log.h>
@@ -21,13 +24,20 @@ using grpc::Status;
 using grpc::StatusCode;
 using grpcHandler::GrpcHandler;
 using grpcHandler::NdrResponse;
+using namespace std;
 
 int g_thread_num = 1;
 int g_cq_num = 1;
 int g_pool = 1;
 int g_port = 50051;
 
+class NdrBidi;
+
 std::atomic<void *> **g_instance_pool = nullptr;
+// queue of ho preps to process and release <tag, message>
+std::queue<pair<void*,std::string>> globalQueue;
+// map of all bidis
+unordered_map<void*, NdrBidi *> hashMap;
 
 class CallDataBase
 {
@@ -60,6 +70,9 @@ class NdrBidi : CallDataBase
 {
 
 public:
+  // queue of messages to be sent
+  std::queue<std::string> localQueue;
+
   // Take in the "service" instance (in this case representing an asynchronous
   // server) and the completion queue "cq" used for asynchronous communication
   // with the gRPC runtime.
@@ -80,6 +93,14 @@ public:
 
     switch (status_)
     {
+    case NdrStatus::CONNECT:
+      std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " connected:" << std::endl;
+      // add to the hashmap, so its localQueue can be accessed by the main threaf
+      hashMap[(void*)this] = new NdrBidi(service_, cq_);
+      rw_.Read(&request_, (void *)this);
+      status_ = NdrStatus::READ;
+      break;
+
     case NdrStatus::READ:
 
       //Meaning client said it wants to end the stream either by a 'writedone' or 'finish' call.
@@ -95,25 +116,40 @@ public:
 
       std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " Read a new message:" << request_.message() << std::endl;
 
-      reply_.set_message(request_.message());
+      reply_.set_message("NDR DONE");
       rw_.Write(reply_, (void *)this);
-      // reply_.set_message("stop");
-      // rw_.Write(reply_, (void *)this);
-
       status_ = NdrStatus::WRITE;
+
+      // TODO add random number
+      // this simulates the generation of an HO PREP
+      globalQueue.push({(void *)this, "HO PREP"});
       break;
 
     case NdrStatus::WRITE:
       std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " Written a message:" << reply_.message() << std::endl;
-      rw_.Read(&request_, (void *)this);
-      status_ = NdrStatus::READ;
-      break;
-
-    case NdrStatus::CONNECT:
-      std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " connected:" << std::endl;
-      new NdrBidi(service_, cq_);
-      rw_.Read(&request_, (void *)this);
-      status_ = NdrStatus::READ;
+      
+      // check if other messages need to be sent
+      if (!localQueue.empty())
+      {
+         // send a message from the queue
+         reply_.set_message(localQueue.front());
+         localQueue.pop();
+         rw_.Write(reply_, (void *)this);
+         i++;
+      } 
+      else if (reply_.message() == "WRITING DONE")
+      {
+         // listen for next message from client
+         rw_.Read(&request_, (void *)this);
+         status_ = NdrStatus::READ;
+      }
+      else
+      {
+         // notify the client that the server is done sending
+         reply_.set_message("WRITING DONE");
+         rw_.Write(reply_, (void *)this);
+         i++;
+      }
       break;
 
     case NdrStatus::DONE:
@@ -148,6 +184,9 @@ private:
     FINISH = 5
   };
   NdrStatus status_;
+
+  // tracks the number of HO PREPS sent by this serverContext
+  int i = 0;
 
   std::mutex m_mutex;
 };
@@ -195,6 +234,7 @@ public:
       int _cq_idx = i % g_cq_num;
       for (int j = 0; j < g_pool; ++j)
       {
+        // TODO - store this bidi in a hashmap ??????
         new NdrBidi(&service_, m_cq[_cq_idx].get());
       }
 
@@ -202,6 +242,23 @@ public:
     }
 
     std::cout << g_thread_num << " working aysnc threads spawned" << std::endl;
+
+    // listen to global queue for messages to appear
+    while (true)
+    {
+       if (!globalQueue.empty())
+       {
+         // process for 1 second
+         std::cout << "  Processing message: " << globalQueue.front().second << " from tag: " << globalQueue.front().first << std::endl;
+         usleep(100);
+
+         // add this message to this bidi's local queue
+         hashMap[globalQueue.front().first]->localQueue.push(globalQueue.front().second);
+
+         // remove from global queue
+         globalQueue.pop();
+       }
+    }
 
     for (const auto &_t : _vec_threads)
       _t->join();

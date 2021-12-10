@@ -5,6 +5,8 @@
 #include <unordered_map>
 #include <sstream>
 #include <ctime>
+#include <unistd.h>
+#include <queue>
 
 #include <grpc/support/log.h>
 #include <grpcpp/grpcpp.h>
@@ -61,22 +63,11 @@ class GrpcHandlerClient
       std::unique_ptr<ClientAsyncReaderWriter<NdrResponse, NdrResponse>> stream_;
    };
 
-   // struct MessageFormat
-   // {
-   //    // Container for the data we send to the server.
-   //    NdrResponse request;
-
-   //    // Container for the data we expect from the server.
-   //    NdrResponse reply;
-
-   //    // Uniquely identify the message
-   //    std::string mac;
-
-   //    AsyncClientCall *call;
-   // };
+   
 
 public:
-   unordered_map<int, AsyncClientCall *> hashMap;
+   //unordered_map<int, AsyncClientCall *> hashMap;
+   std::queue<AsyncClientCall *> contextQueue;
 
    explicit GrpcHandlerClient(std::shared_ptr<Channel> channel, int count)
        : stub_(GrpcHandler::NewStub(channel))
@@ -94,8 +85,17 @@ public:
          // the "call" instance in order to get updates on the ongoing RPC.
          call->stream_ =
              stub_->AsyncSayHelloNew(&call->context, &cq_, (void *)call);
-         hashMap[i] = call;
+         //hashMap[i] = call;
+         contextQueue.push(call);
       }
+   }
+
+   AsyncClientCall* getNextContext()
+   {
+      AsyncClientCall *call = contextQueue.front();
+      contextQueue.pop();
+      contextQueue.push(call);
+      return call;
    }
 
    // Assembles the client's payload and sends it to the server.
@@ -120,40 +120,32 @@ public:
 
       std::cout << "Sending testMessage via Call context ID: " << call << std::endl;
 
-      int i = startNum;
-      while (i <= startNum + 900) // true
-      {
+      // int i = startNum;
+      // while (i <= startNum + 4) // true
+      // {
 
-         // MessageFormat *msg = new MessageFormat();
-         call->mac = mac + std::to_string(i);
+      // MessageFormat *msg = new MessageFormat();
+         call->mac = mac + std::to_string(startNum); //+ std::to_string(i);
+         std::chrono::time_point<std::chrono::system_clock> _deadline = std::chrono::system_clock::now() + std::chrono::seconds(30);
+         call->context.set_deadline(_deadline);
          // msg->call = call;
 
          std::string text;
          std::stringstream ss;
          ss << call;
-         text = "testMessage from : " + mac + std::to_string(i);
+         text = "testMessage from : " + mac + std::to_string(startNum); //+ std::to_string(i);
          /*if (i == 3) {
             text = "quit";
          }*/
          if (!evaluateMessage(text, call))
          {
-            std::cout << "TestMessage send complete from Call context ID : " << call << std::endl;
-            std::cout << "Quitting." << std::endl;
-            break;
+         std::cout << "TestMessage send complete from Call context ID : " << call << std::endl;
+         std::cout << "Quitting." << std::endl;
+         // break;
          }
-         i++;
-      }
+         //    i++;
+         // }
    }
-
-   /*void AsyncHelloRequestNextMessage(AsyncClientCall *call)
-   {
-
-      // The tag is the link between our thread (main thread) and the completion
-      // queue thread. The tag allows the completion queue to fan off
-      // notification handlers for the specified read/write requests as they
-      // are being processed by gRPC.
-      call->stream_->Read(&call->reply, reinterpret_cast<void *>(Type::READ));
-   }*/
 
    // Loop while listening for completed responses.
    // Prints out the response from the server.
@@ -170,7 +162,7 @@ public:
 
          // Verify that the request was completed successfully. Note that "ok"
          // corresponds solely to the request for updates introduced by Finish().
-         GPR_ASSERT(ok);
+         //GPR_ASSERT(ok);
 
          // It's important to process all tags even if the ok is false. One might
          // want to deallocate memory that has be reinterpret_cast'ed to void*
@@ -182,27 +174,32 @@ public:
             switch (static_cast<Type>(reinterpret_cast<long>(got_tag)))
             {
             case Type::CONNECT:
-               std::cout << "Server connected." << std::endl;
+               std::cout << "  Server connected." << std::endl;
                call->serverConnected = true;
                break;
             case Type::WRITES_DONE:
-               std::cout << "Streaming complete for that bidirectional stream:" << got_tag << std::endl;
+               std::cout << "  Streaming complete for that bidirectional stream:" << got_tag << std::endl;
                break;
             default:
-               std::cout << "Received message :" << call->request.has_message() << ":" << call->reply.has_message() << ":" << std::endl;
-               //Process requests from the server
+               std::cout << "  Request has message: " << call->request.has_message() << std::endl;
+               std::cout << "  Reply has message: " << call->reply.has_message() << std::endl;
+               // Process requests from the server
                if (!call->request.has_message() && !call->reply.has_message())
                {
-                  if (!call->serverConnected) {
-                     std::cout << "Server connected." << std::endl;
+                  if (!call->serverConnected)
+                  {
+                     std::cout << "  Server connected." << std::endl;
                      call->serverConnected = true;
                      break;
                   }
                }
                if (call->reply.has_message())
                {
-                  std::cout << "Read a new message:" << call->reply.message() << std::endl;
-                  call->request.clear_message();
+                  std::cout << "  Read a new message:" << call->reply.message() << std::endl;
+                  if (call->reply.message() == "WRITING DONE")
+                  {
+                     call->request.clear_message();
+                  }
                   call->reply.clear_message();
                }
                if (call->request.has_message())
@@ -229,7 +226,7 @@ private:
    // closed). Returns false when the stream is requested to be closed.
    bool evaluateMessage(const std::string &user, AsyncClientCall *call)
    {
-      std::cout << "Check write status:" << call->request.has_message() << std::endl;
+      // std::cout << "Check write status:" << call->request.has_message() << std::endl;
 
       while (call->request.has_message() == 1 || !call->serverConnected)
       {
@@ -239,7 +236,7 @@ private:
 
       if (user == "quit")
       {
-         std::cout << " ** Sending complete from: " << call << std::endl;
+         std::cout << "**** Sending complete from: " << call << std::endl;
          call->stream_->WritesDone(reinterpret_cast<void *>(Type::WRITES_DONE));
          return false;
       }
@@ -255,7 +252,7 @@ private:
       if (call->request.has_message() == 0)
       {
          call->request.set_message(user);
-         std::cout << " ** Sending request from: " << call << std::endl;
+         std::cout << "**** Sending request from: " << call << std::endl;
          call->stream_->Write(call->request, (void *)call);
       }
       return true;
@@ -279,7 +276,7 @@ private:
 int main(int argc, char **argv)
 {
    // Give the number of bidirectional pools as input
-   int poolCount = 1;
+   int poolCount = 2;
 
    // Instantiate the client. It requires a channel, out of which the actual RPCs
    // are created. This channel models a connection to an endpoint (in this case,
@@ -295,60 +292,76 @@ int main(int argc, char **argv)
    // int threadCount = 2;
    std::thread t[poolCount];
 
-   int clientId = 0;
+   int id = 0;
    time_t now = time(0);
    std::string macString = "00a0bc";
-   for (int i = 0; i < poolCount; i++)
+   /*for (int i = 0; i < poolCount; i++)
    {
-      clientId++;
-      // round robin the clientId for every MAC
-      if (clientId > poolCount)
+      id++;
+      // round robin the id for every MAC
+      if (id > poolCount)
       {
-         clientId = 1;
+         id = 1;
       }
-      // Just check client context at the start of the test before sending messages
-      if (greeter.hashMap[clientId] == NULL)
+      
+      while (!greeter.getNextContext()->serverConnected)
       {
-         std::cout << "Client " << greeter.hashMap[clientId] << "no more" << std::endl;
+         // Wait until server is connected before we start sending NDRs
       }
+      //std::cout << "Server connected for " << greeter.hashMap[id] << " and we are good to process NDRs" << std::endl;
+      // t[i] = std::thread(&GrpcHandlerClient::sendMessage, &greeter, macString, i * 1000, greeter.hashMap[id]); // The actual RPC call
+   }*/
 
-      while (!greeter.hashMap[clientId]->serverConnected) {
-         //Wait until server is connected before we start sending NDRs
+   // send a random number of messages to different rpcs
+   flag serverConnected = true;
+   for (int i = 0; i < 100000; i++)
+   {
+      // Is server up before we send the RPC?
+      std::chrono::time_point<std::chrono::system_clock> _deadline = std::chrono::system_clock::now() + std::chrono::hours(24);
+      auto state = channelName->GetState(true);
+      while (state != GRPC_CHANNEL_READY)
+      {
+         if(serverConnected) {
+            serverConnected = false;
+            std::cout << "Server disconnected... Retrying to connect" << std::endl;
+         }
+         if (!channelName->WaitForStateChange(state, _deadline))
+         {
+            return false;
+         }
+         state = channelName->GetState(true);
       }
-      std::cout << "Server connected for " << greeter.hashMap[clientId] << " and we are good to process NDRs" << std::endl;
-      t[i] = std::thread(&GrpcHandlerClient::sendMessage, &greeter, macString, i * 1000, greeter.hashMap[clientId]); // The actual RPC call!
-                                                                                                                        // greeter.sendMessage(macString + to_string(j), greeter.hashMap[clientId]->call);
+      if (state == GRPC_CHANNEL_READY) {
+         serverConnected = true;
+      }
+      greeter.sendMessage(macString, i, greeter.getNextContext());
+      usleep(200);
+      greeter.sendMessage(macString, i, greeter.getNextContext());
+      usleep(200);
    }
+
    // Join the threads with the main thread
-   for (int i = 0; i < poolCount; ++i)
-   {
-      std::cout << "Message processing for " << greeter.hashMap[clientId] << " complete" << std::endl;
-      t[i].join();
-   }
+   // for (int i = 0; i < poolCount; ++i)
+   // {
+   //    std::cout << "Message processing for " << greeter.hashMap[id] << " complete" << std::endl;
+   //    t[i].join();
+   // }
    time_t then = time(0);
-   std::cout << "Time difference for processing is all messages is " << then-now << " seconds" << std::endl;
-
-   // Verify client context is closed at the end of the run and there no bidirectional streams anymore
-   for (auto i : greeter.hashMap)
-   {
-      std::cout << i.first << ":" << i.second << ":" << std::endl;
-      if (i.second == NULL)
-      {
-         std::cout << "Client " << i.second << " no more" << std::endl;
-      }
-      else
-      {
-         i.second->stream_->Finish(&i.second->finish_status_, (void *)i.second);
-         std::cout << "Client " << i.second << " no more after calling finish" << std::endl;
-      }
-   }
-
-   std::cout << "All bidirectional streams closed successfully" << std::endl;
+   std::cout << "Time difference for processing is all messages is " << then - now << " seconds" << std::endl;
 
    // Below is the block for AsyncComplete queue which blocks for ever until we have a client restart..
    std::cout << "Press control-c to quit" << std::endl
              << std::endl;
    thread_.join(); // blocks forever
+
+   // Verify client context is closed at the end of the run and there no bidirectional streams anymore
+   while (!greeter.contextQueue.empty())
+   {
+      greeter.contextQueue.front()->stream_->Finish(&greeter.contextQueue.front()->finish_status_, (void *)greeter.contextQueue.front());
+      std::cout << "Client " << greeter.contextQueue.front() << " no more after calling finish" << std::endl;
+   }
+
+   std::cout << "All bidirectional streams closed successfully" << std::endl;
 
    return 0;
 }
