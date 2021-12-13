@@ -129,8 +129,8 @@ public:
         globalQueue.push({(void *)this, "HO PREP"});
         hoPrepCount++;
         std::cout << "HO Prep Count incremented:" << hoPrepCount << std::endl;
-        //localQueue.push("HO PREP");
-        // continue reading from the client
+        // localQueue.push("HO PREP");
+        //  continue reading from the client
         rw_.Read(&request_, (void *)this);
       }
       // reply_.set_message("NDR DONE");
@@ -141,14 +141,14 @@ public:
     case NdrStatus::WRITE:
       std::cout << "   WRITE" << std::endl;
       // check if other messages need to be sent
-      if (!localQueue.empty())
+      if (!hashMap[(void *)this]->localQueue.empty())
       {
         // send a message from the queue
-        //std::cout << "   Writing message " << localQueue.front() << std::endl;
+        // std::cout << "   Writing message " << localQueue.front() << std::endl;
         hoPrepCount--;
         std::cout << "HO Prep Count decremented:" << hoPrepCount << std::endl;
-        reply_.set_message(localQueue.front());
-        localQueue.pop();
+        reply_.set_message(hashMap[(void *)this]->localQueue.front());
+        hashMap[(void *)this]->localQueue.pop();
         rw_.Write(reply_, (void *)this);
       }
       else
@@ -272,7 +272,7 @@ public:
       if (!globalQueue.empty())
       {
         // process for 1/2 second
-        //usleep(500);
+        // usleep(500);
         std::cout << "   Finished processing message: " << globalQueue.front().second << " from tag: " << globalQueue.front().first << std::endl;
 
         // add this message to this bidi's local queue
@@ -348,3 +348,4 @@ int main(int argc, char **argv)
 
   return 0;
 }
+

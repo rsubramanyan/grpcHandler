@@ -1,3 +1,4 @@
+            // loop until the connection is re-established
 #include <iostream>
 #include <memory>
 #include <string>
@@ -37,7 +38,8 @@ class GrpcHandlerClient
       WRITE = 2,
       CONNECT = 3,
       WRITES_DONE = 4,
-      FINISH = 5
+      WAITING_TO_WRITE = 5,
+      FINISH = 6
    };
 
    // struct for keeping state and data information
@@ -172,17 +174,6 @@ public:
       ss << call;
       text = "testMessage from : " + mac + std::to_string(startNum); //+ std::to_string(i);
       call->localQueue.push(text);
-      /*if (i == 3) {
-         text = "quit";
-      }*/
-      // if (!evaluateMessage(text, call))
-      // {
-      //    std::cout << "TestMessage send complete from Call context ID : " << call << std::endl;
-      //    std::cout << "Quitting." << std::endl;
-      //    // break;
-      // }
-      //    i++;
-      // }
    }
 
    // Loop while listening for completed responses.
@@ -191,7 +182,6 @@ public:
    {
       void *got_tag;
       bool ok = false;
-      //bool failFlag = false;
 
       // Block until the next result is available in the completion queue "cq".
       while (true)
@@ -199,24 +189,33 @@ public:
          // Verify that the request was completed successfully. Note that "ok"
          // corresponds solely to the request for updates introduced by Finish().
          GPR_ASSERT(cq_.Next(&got_tag, &ok));
-         //GPR_ASSERT(ok);
-
-         auto state = channelName->GetState(true);
-         while (state != GRPC_CHANNEL_READY)
-         {
-            //failFlag = true;
-            state = channelName->GetState(true);
-            std::cout << "Current State is " << state << std::endl;
-            if (state == GRPC_CHANNEL_READY)
-            {
-               std::cout << "Restart existing context IDs from here" << std::endl;
-               break;
-            }
-         }
+         //GPR_ASSERT(ok);        
          
-
          // The tag in this example is the memory location of the call object
          AsyncClientCall *call = static_cast<AsyncClientCall *>(got_tag);
+
+         // ensure the client can send to the server
+         auto state = channelName->GetState(true);
+         if (state != GRPC_CHANNEL_READY)
+         {
+            std::cout << "Connection to server lost." << std::endl;
+            // loop until the connection is re-established
+            while (channelName->GetState(true) != GRPC_CHANNEL_READY)
+            {
+               //
+            }
+            std::cout << "Connection to server re-established." << std::endl;
+
+            // re-establsih streams with server
+            int size = contextQueue.size();
+            while (contextQueue.size() > 0)
+            {
+               contextQueue.pop();
+            }
+            std::cout << "Re-establishing " << size << " streams with server." << std::endl;
+            // TODO - this should be a configurable parameter, instead of using contextQueue.size()
+            establishConnectionToStreams(size);
+         }
 
          // It's important to process all tags even if the ok is false. One might
          // want to deallocate memory that has be reinterpret_cast'ed to void*
@@ -224,16 +223,14 @@ public:
          // void*, so we don't have extra memory management to take care of.
          if (ok)
          {
-            std::cout << "**** Call Tag: " << got_tag << std::endl;
-            // grpc::Alarm alarm;
+            // std::cout << "**** Call Tag: " << got_tag << std::endl;
             switch (call->status)
             {
             case ClientStatus::CONNECT:
                std::cout << "   CONNECT" << std::endl;
-               std::cout << "   Server connected." << std::endl;
+               std::cout << "   Stream connected." << std::endl;
                call->serverConnected = true;
                call->status = ClientStatus::WRITE;
-               // since we aren't writing anything here, we need to add an alarm to the queue
                PutTaskBackToQueue(call);
                break;
             case ClientStatus::READ:
@@ -243,10 +240,7 @@ public:
                {
                   // TODO - maybe don't need to clear this
                   call->request.clear_message();
-                  //call->reply.clear_message();
                   call->status = ClientStatus::WRITE;
-                  // alarm_.reset(new Alarm);
-                  // alarm_->Set(&cq_, std::chrono::system_clock::now(), (void *)call);
                   PutTaskBackToQueue(call);
                }
                else
@@ -258,9 +252,6 @@ public:
                break;
             case ClientStatus::WRITE:
                std::cout << "   WRITE" << std::endl;
-
-               // Is server up before we send the RPC?
-               //std::chrono::time_point<std::chrono::system_clock> _deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(10000);
                if (!call->localQueue.empty())
                {
                   call->thresholdCount = 0;
@@ -284,9 +275,12 @@ public:
                      call->status = ClientStatus::WRITES_DONE;
                      call->stream_->Write(call->request, (void *)call);
                   } else {
+                     std::cout << "   Threshold met." << std::endl;
                      call->reply.clear_message();
+                     // TODO - instead of threshold of messages, this should be a 5 sec timer
                      call->thresholdCount = 0;
-                     //waitForWrite();
+                     call->status = ClientStatus::WAITING_TO_WRITE;
+                     PutTaskBackToQueue(call);
                   }
                }
                break;
@@ -295,6 +289,20 @@ public:
                // read messages from the server
                call->status = ClientStatus::READ;
                call->stream_->Read(&call->reply, (void *)call);
+               break;
+            case ClientStatus::WAITING_TO_WRITE:
+               // check the localQueue until there is a message to write
+               // std::cout << "   WAITING_TO_WRITE" << std::endl;
+               // TODO - this could also be a while loop, where the client doesn't loop through
+               // the completion queue (and thus doesn't constantly check the status of the server)
+               // but for debugging reconnecting to the server, this is useful
+               if (!call->localQueue.empty())
+               {
+                  // go to WRITE
+                  std::cout << "   going to WRITE" << std::endl;
+                  call->status = ClientStatus::WRITE;
+               }
+               PutTaskBackToQueue(call);
                break;
             case ClientStatus::FINISH:
                std::cout << "   FINISH" << std::endl;
@@ -377,7 +385,7 @@ private:
       return true;
    }
 
-   // alarm used to put tasks to the back of the completion queue
+   // uses the GRPC alarm to put tasks to the back of the completion queue
    void PutTaskBackToQueue(AsyncClientCall *call)
    {
       call->alarm_.reset(new Alarm);
@@ -464,10 +472,7 @@ int main(int argc, char **argv)
    for (int i = 0; i < g_message_num; i++)
    {
       greeter.sendToQueue(macString, i, greeter.getNextContext());
-      usleep(500);
-      // greeter.sendToQueue(macString, i, greeter.getNextContext());
-      // usleep(500);
-      //std::cout << greeter.contextQueue.size() << std::endl;
+      sleep(3); // TODO - sleep time should be a parameter
    }
 
    std::cout << "Queue processing complete" << std::endl;
