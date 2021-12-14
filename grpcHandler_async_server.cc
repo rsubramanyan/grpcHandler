@@ -76,6 +76,8 @@ public:
   // queue of messages to be sent
   std::queue<std::string> localQueue;
 
+  bool reportedDone;
+
   // Take in the "service" instance (in this case representing an asynchronous
   // server) and the completion queue "cq" used for asynchronous communication
   // with the gRPC runtime.
@@ -95,7 +97,7 @@ public:
     switch (status_)
     {
     case NdrStatus::CONNECT:
-      std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " connected:" << std::endl;
+      std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " CONNECT: client connected" << std::endl;
       // add to the hashmap, so its localQueue can be accessed by the main threaf
       hashMap[(void *)this] = new NdrBidi(service_, cq_);
       rw_.Read(&request_, (void *)this);
@@ -103,50 +105,49 @@ public:
       break;
 
     case NdrStatus::READ:
-      // TODO remove this?
+      // TODO remove this? or move it outside of the switch statement
       // Meaning client said it wants to end the stream either by a 'writedone' or 'finish' call.
       if (!ok)
       {
-        std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " CQ returned false." << std::endl;
+        std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " READ: CQ returned false." << std::endl;
         Status _st(StatusCode::OUT_OF_RANGE, "test error msg");
         status_ = NdrStatus::DONE;
         rw_.Finish(_st, (void *)this);
-        std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " after call Finish(), cancelled:" << this->ctx_.IsCancelled() << std::endl;
+        std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " READ: after call Finish(), cancelled:" << this->ctx_.IsCancelled() << std::endl;
         break;
       }
 
-      std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " Read a new message:" << request_.message() << std::endl;
       if (request_.message() == "WRITES_DONE")
       {
         status_ = NdrStatus::WRITE;
-        usleep(500);
         PutTaskBackToQueue();
       }
       else
       {
+        std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " READ: Read a new message:" << request_.message() << std::endl;
         // simulate the generation of responses
-        // TODO make variable number of responses
         globalQueue.push({(void *)this, "HO PREP"});
-        hoPrepCount++;
-        std::cout << "HO Prep Count incremented:" << hoPrepCount << std::endl;
-        // localQueue.push("HO PREP");
-        //  continue reading from the client
-        rw_.Read(&request_, (void *)this);
+        //   hoPrepCount++;
+        //   std::cout << "HO Prep Count incremented:" << hoPrepCount << std::endl;
+
+        // write responses back to client
+        status_ = NdrStatus::WRITE;
+        PutTaskBackToQueue();
+        // //  continue reading from the client
+        // rw_.Read(&request_, (void *)this);
       }
-      // reply_.set_message("NDR DONE");
-      // rw_.Write(reply_, (void *)this);
-      // status_ = NdrStatus::WRITE;
       break;
 
     case NdrStatus::WRITE:
-      std::cout << "   WRITE" << std::endl;
+      //std::cout << "   WRITE" << std::endl;
       // check if other messages need to be sent
       if (!hashMap[(void *)this]->localQueue.empty())
       {
         // send a message from the queue
         // std::cout << "   Writing message " << localQueue.front() << std::endl;
-        hoPrepCount--;
-        std::cout << "HO Prep Count decremented:" << hoPrepCount << std::endl;
+        //hoPrepCount--;
+        reportedDone = false;
+        std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " WRITE: Sending HO Prep to client" << std::endl;
         reply_.set_message(hashMap[(void *)this]->localQueue.front());
         hashMap[(void *)this]->localQueue.pop();
         rw_.Write(reply_, (void *)this);
@@ -161,20 +162,23 @@ public:
       break;
 
     case NdrStatus::WRITES_DONE:
-      std::cout << "   WRITES_DONE" << std::endl;
+      //std::cout << "   WRITES_DONE" << std::endl;
       // read messages from the client
+      if (!reportedDone){
+        std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " WRITES_DONE: Server has no pending messages" << std::endl;
+        reportedDone = true;
+      }
       status_ = NdrStatus::READ;
       rw_.Read(&request_, (void *)this);
       break;
 
     case NdrStatus::DONE:
-      std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this
-                << " Server done, cancelled:" << this->ctx_.IsCancelled() << std::endl;
+      std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " DONE: Server done, cancelled:" << this->ctx_.IsCancelled() << std::endl;
       status_ = NdrStatus::FINISH;
       break;
 
     case NdrStatus::FINISH:
-      std::cout << "thread:" << std::this_thread::get_id() << "tag:" << this << " Server finish, cancelled:" << this->ctx_.IsCancelled() << std::endl;
+      std::cout << "thread:" << std::this_thread::get_id() << "tag:" << this << " FINISH: Server finish, cancelled:" << this->ctx_.IsCancelled() << std::endl;
       _wlock.unlock();
       delete this;
       break;
@@ -272,12 +276,12 @@ public:
       if (!globalQueue.empty())
       {
         // process for 1/2 second
-        // usleep(500);
-        std::cout << "   Finished processing message: " << globalQueue.front().second << " from tag: " << globalQueue.front().first << std::endl;
+        usleep(100);
+        std::cout << "   Incoming message: " << globalQueue.front().second << " from tag: " << globalQueue.front().first << std::endl;
 
         // add this message to this bidi's local queue
         hashMap[globalQueue.front().first]->localQueue.push(globalQueue.front().second);
-        std::cout << "   Local Queue tag: " << globalQueue.front().first << " Size : " << hashMap[globalQueue.front().first]->localQueue.size() << std::endl;
+        std::cout << "   Send to local queue: " << globalQueue.front().first << " Current Size : " << hashMap[globalQueue.front().first]->localQueue.size() << std::endl;
 
         // remove from global queue
         globalQueue.pop();
@@ -348,4 +352,3 @@ int main(int argc, char **argv)
 
   return 0;
 }
-
