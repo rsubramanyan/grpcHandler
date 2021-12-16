@@ -32,15 +32,18 @@ int g_thread_num = 1;
 int g_cq_num = 1;
 int g_pool = 1;
 int g_port = 50051;
+std::string g_varied = "false";
+int g_readTimeout = 100;
 int hoPrepCount = 0;
+int randomCount = 1;
 
-class NdrBidi;
+class BidiCallData;
 
 std::atomic<void *> **g_instance_pool = nullptr;
 // queue of ho preps to process and release <tag, message>
 std::queue<pair<void *, std::string>> globalQueue;
-// map of all bidis
-unordered_map<void *, NdrBidi *> hashMap;
+// map of all streams
+unordered_map<void *, BidiCallData *> hashMap;
 
 class CallDataBase
 {
@@ -55,6 +58,7 @@ protected:
   // The means of communication with the gRPC runtime for an asynchronous
   // server.
   GrpcHandler::AsyncService *service_;
+  
   // The producer-consumer queue where for asynchronous server notifications.
   ServerCompletionQueue *cq_;
 
@@ -65,156 +69,155 @@ protected:
 
   // What we get from the client.
   NdrResponse request_;
+
   // What we send back to the client.
   NdrResponse reply_;
 };
 
-class NdrBidi : CallDataBase
+class BidiCallData : CallDataBase
 {
 
 public:
-  // queue of messages to be sent
-  std::queue<std::string> localQueue;
+   // queue of messages to be sent
+   std::queue<std::string> localQueue;
 
-  bool reportedDone;
+   // Take in the "service" instance (in this case representing an asynchronous
+   // server) and the completion queue "cq" used for asynchronous communication
+   // with the gRPC runtime.
+   BidiCallData(GrpcHandler::AsyncService *service, ServerCompletionQueue *cq) : CallDataBase(service, cq), rw_(&ctx_)
+   {
+      // Invoke the serving logic right away.
+      status_ = StreamStatus::CONNECT;
 
-  // Take in the "service" instance (in this case representing an asynchronous
-  // server) and the completion queue "cq" used for asynchronous communication
-  // with the gRPC runtime.
-  NdrBidi(GrpcHandler::AsyncService *service, ServerCompletionQueue *cq) : CallDataBase(service, cq), rw_(&ctx_)
-  {
-    // Invoke the serving logic right away.
+      ctx_.AsyncNotifyWhenDone((void *)this);
+      service_->RequestSayHelloNew(&ctx_, &rw_, cq_, cq_, (void *)this);
+   }
 
-    status_ = NdrStatus::CONNECT;
+   void Proceed(bool ok)
+   {
+      std::unique_lock<std::mutex> _wlock(this->m_mutex);
 
-    ctx_.AsyncNotifyWhenDone((void *)this);
-    service_->RequestSayHelloNew(&ctx_, &rw_, cq_, cq_, (void *)this);
-  }
-
-  void Proceed(bool ok)
-  {
-    std::unique_lock<std::mutex> _wlock(this->m_mutex);
-    switch (status_)
-    {
-    case NdrStatus::CONNECT:
-      std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " CONNECT: client connected" << std::endl;
-      // add to the hashmap, so its localQueue can be accessed by the main threaf
-      hashMap[(void *)this] = new NdrBidi(service_, cq_);
-      rw_.Read(&request_, (void *)this);
-      status_ = NdrStatus::READ;
-      break;
-
-    case NdrStatus::READ:
-      // TODO remove this? or move it outside of the switch statement
-      // Meaning client said it wants to end the stream either by a 'writedone' or 'finish' call.
-      if (!ok)
+      switch (status_)
       {
-        std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " READ: CQ returned false." << std::endl;
-        Status _st(StatusCode::OUT_OF_RANGE, "test error msg");
-        status_ = NdrStatus::DONE;
-        rw_.Finish(_st, (void *)this);
-        std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " READ: after call Finish(), cancelled:" << this->ctx_.IsCancelled() << std::endl;
-        break;
+         case StreamStatus::CONNECT:
+            std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " CONNECT: client connected" << std::endl;
+            // add to the hashmap, so its localQueue can be accessed by the main thread
+            hashMap[(void *)this] = new BidiCallData(service_, cq_);
+            rw_.Read(&request_, (void *)this);
+            status_ = StreamStatus::PROCESS;
+            activeRead = true;
+            break;
+
+         case StreamStatus::PROCESS:
+            // TODO - implement this shutdown behavior somewhere else
+            // Meaning client said it wants to end the stream either by a 'writedone' or 'finish' call.
+            // if (!ok)
+            // {
+            //   std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " READ: CQ returned false." << std::endl;
+            //   Status _st(StatusCode::OUT_OF_RANGE, "test error msg");
+            //   status_ = StreamStatus::DONE;
+            //   rw_.Finish(_st, (void *)this);
+            //   std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " READ: after call Finish(), cancelled:" << this->ctx_.IsCancelled() << std::endl;
+            //   break;
+            // }
+
+            if (request_.has_message())
+            {
+               // Process the request from the client
+               std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " READ: Read a new message:" << request_.message() << std::endl;
+               // simulate the generation of responses
+               if (randomCount % 2 == 1 && g_varied == "true")
+               {
+                  globalQueue.push({(void *)this, "HO PREP"});
+                  globalQueue.push({(void *)this, "HO PREP"});
+                  globalQueue.push({(void *)this, "HO PREP"});
+               }
+               else
+               {
+                  globalQueue.push({(void *)this, "HO PREP"});
+               }
+               randomCount++;
+               
+               // Prepare to read another request, but don't start a READ (prioritize WRITE's)
+               request_.clear_message();
+               activeRead = false;
+            } else {
+               if (activeRead)
+               {
+                  std::cout << "READ timed out." << std::endl;
+               }
+            }
+
+            if (!hashMap[(void *)this]->localQueue.empty())
+            {
+               // WRITE a message from the queue
+               std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " WRITE: Sending HO Prep to client" << std::endl;
+               reply_.set_message(hashMap[(void *)this]->localQueue.front());
+               hashMap[(void *)this]->localQueue.pop();
+               rw_.Write(reply_, (void *)this);
+            }
+            else
+            {
+               // Start a READ if one isn't already active
+               if (!activeRead)
+               {
+                  activeRead = true;
+                  rw_.Read(&request_, (void *)this);
+               }
+            }
+            // Push the call to the back of the completion queue
+            status_ = StreamStatus::PUSH_TO_BACK;
+            break;
+
+         case StreamStatus::PUSH_TO_BACK:
+            // Pushing the call to the back of the completion queue ensures
+            // all streams are handled in a round-robin fashion
+            status_ = StreamStatus::PROCESS;
+            PutTaskBackToQueue();
+            break;
+         
+         /* TODO - implement finish
+         case StreamStatus::FINISH:
+            std::cout << "thread:" << std::this_thread::get_id() << "tag:" << this << " FINISH: Server finish, cancelled:" << this->ctx_.IsCancelled() << std::endl;
+            _wlock.unlock();
+            delete this;
+            break;
+         */
+
+         default:
+            std::cerr << "ERROR: Unrecognized status: " << int(status_) << std::endl;
+            assert(false);
       }
-
-      if (request_.message() == "WRITES_DONE")
-      {
-        status_ = NdrStatus::WRITE;
-        PutTaskBackToQueue();
-      }
-      else
-      {
-        std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " READ: Read a new message:" << request_.message() << std::endl;
-        // simulate the generation of responses
-        globalQueue.push({(void *)this, "HO PREP"});
-        //   hoPrepCount++;
-        //   std::cout << "HO Prep Count incremented:" << hoPrepCount << std::endl;
-
-        // write responses back to client
-        status_ = NdrStatus::WRITE;
-        PutTaskBackToQueue();
-        // //  continue reading from the client
-        // rw_.Read(&request_, (void *)this);
-      }
-      break;
-
-    case NdrStatus::WRITE:
-      //std::cout << "   WRITE" << std::endl;
-      // check if other messages need to be sent
-      if (!hashMap[(void *)this]->localQueue.empty())
-      {
-        // send a message from the queue
-        // std::cout << "   Writing message " << localQueue.front() << std::endl;
-        //hoPrepCount--;
-        reportedDone = false;
-        std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " WRITE: Sending HO Prep to client" << std::endl;
-        reply_.set_message(hashMap[(void *)this]->localQueue.front());
-        hashMap[(void *)this]->localQueue.pop();
-        rw_.Write(reply_, (void *)this);
-      }
-      else
-      {
-        // notify the client that the server is done sending
-        reply_.set_message("WRITES_DONE");
-        status_ = NdrStatus::WRITES_DONE;
-        rw_.Write(reply_, (void *)this);
-      }
-      break;
-
-    case NdrStatus::WRITES_DONE:
-      //std::cout << "   WRITES_DONE" << std::endl;
-      // read messages from the client
-      if (!reportedDone){
-        std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " WRITES_DONE: Server has no pending messages" << std::endl;
-        reportedDone = true;
-      }
-      status_ = NdrStatus::READ;
-      rw_.Read(&request_, (void *)this);
-      break;
-
-    case NdrStatus::DONE:
-      std::cout << "thread:" << std::this_thread::get_id() << " tag:" << this << " DONE: Server done, cancelled:" << this->ctx_.IsCancelled() << std::endl;
-      status_ = NdrStatus::FINISH;
-      break;
-
-    case NdrStatus::FINISH:
-      std::cout << "thread:" << std::this_thread::get_id() << "tag:" << this << " FINISH: Server finish, cancelled:" << this->ctx_.IsCancelled() << std::endl;
-      _wlock.unlock();
-      delete this;
-      break;
-
-    default:
-      std::cerr << "Unexpected tag " << int(status_) << std::endl;
-      assert(false);
-    }
-  }
+   }
 
 private:
-  // The means to get back to the client.
-  ServerAsyncReaderWriter<NdrResponse, NdrResponse> rw_;
+   // The means to get back to the client.
+   ServerAsyncReaderWriter<NdrResponse, NdrResponse> rw_;
 
-  // Let's implement a tiny state machine with the following states.
-  enum class NdrStatus
-  {
-    READ = 1,
-    WRITE = 2,
-    CONNECT = 3,
-    WRITES_DONE = 4,
-    DONE = 5,
-    FINISH = 6
-  };
-  NdrStatus status_;
+   // Let's implement a tiny state machine with the following states.
+   enum class StreamStatus
+   {
+      CONNECT = 1,
+      PROCESS = 2,
+      PUSH_TO_BACK = 3,
+      FINISH = 4
+   };
+   StreamStatus status_;
 
-  // alarm used to put tasks to the back of the completion queue
-  std::unique_ptr<Alarm> alarm_;
+   // Whether the stream has an active READ on the completion queue
+   bool activeRead = false;
 
-  void PutTaskBackToQueue()
-  {
-    alarm_.reset(new Alarm);
-    alarm_->Set(cq_, gpr_now(gpr_clock_type::GPR_CLOCK_REALTIME), this);
-  }
+   // alarm used to put tasks to the back of the completion queue
+   std::unique_ptr<Alarm> alarm_;
 
-  std::mutex m_mutex;
+   // puts tasks to the back of the completion queue
+   void PutTaskBackToQueue()
+   {
+      alarm_.reset(new Alarm);
+      alarm_->Set(cq_, gpr_now(gpr_clock_type::GPR_CLOCK_REALTIME), this);
+   }
+
+   std::mutex m_mutex;
 };
 
 class ServerImpl final
@@ -245,7 +248,6 @@ public:
 
     for (int i = 0; i < g_cq_num; ++i)
     {
-      // cq_ = builder.AddCompletionQueue();
       m_cq.emplace_back(builder.AddCompletionQueue());
     }
 
@@ -261,8 +263,7 @@ public:
       int _cq_idx = i % g_cq_num;
       for (int j = 0; j < g_pool; ++j)
       {
-        // TODO - store this bidi in a hashmap ??????
-        new NdrBidi(&service_, m_cq[_cq_idx].get());
+        new BidiCallData(&service_, m_cq[_cq_idx].get());
       }
 
       _vec_threads.emplace_back(new std::thread(&ServerImpl::HandleRpcs, this, _cq_idx));
@@ -275,15 +276,11 @@ public:
     {
       if (!globalQueue.empty())
       {
-        // process for 1/2 second
-        usleep(100);
         std::cout << "   Incoming message: " << globalQueue.front().second << " from tag: " << globalQueue.front().first << std::endl;
 
         // add this message to this bidi's local queue
         hashMap[globalQueue.front().first]->localQueue.push(globalQueue.front().second);
         std::cout << "   Send to local queue: " << globalQueue.front().first << " Current Size : " << hashMap[globalQueue.front().first]->localQueue.size() << std::endl;
-
-        // remove from global queue
         globalQueue.pop();
       }
     }
@@ -298,21 +295,39 @@ private:
   // This can be run in multiple threads if needed.
   void HandleRpcs(int cq_idx)
   {
-    // Spawn a new NdrBidi instance to serve new clients.
+    // Spawn a new BidiCallData instance to serve new clients.
     void *tag; // uniquely identifies a request.
     bool ok;
+    bool proceed = false;
+
     while (true)
     {
       // Block waiting to read the next event from the completion queue. The
       // event is uniquely identified by its tag, which in this case is the
-      // memory address of a NdrBidi instance.
+      // memory address of a BidiCallData instance.
       // The return value of Next should always be checked. This return value
       // tells us whether there is any kind of event or cq_ is shutting down.
-      // GPR_ASSERT(cq_->Next(&tag, &ok));
-      GPR_ASSERT(m_cq[cq_idx]->Next(&tag, &ok));
+      std::chrono::time_point<std::chrono::system_clock> deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(g_readTimeout);
+      switch (m_cq[cq_idx]->AsyncNext(&tag, &ok, deadline))
+      {
+         case grpc::CompletionQueue::TIMEOUT:
+         //uncomment_to_debug std::cout << "TIMEOUT" << std::endl;
+         break;
+         case grpc::CompletionQueue::SHUTDOWN:
+         std::cout << "SHUTDOWN" << std::endl;
+         // TODO - implement shutdown procedure
+         break;
+         case grpc::CompletionQueue::GOT_EVENT:
+         // uncomment_to_debug std::cout << "WORK_FOUND" << std::endl;
+         proceed = true;
+         break;
+      }
 
-      CallDataBase *_p_ins = (CallDataBase *)tag;
-      _p_ins->Proceed(ok);
+      if (proceed)
+      {
+        CallDataBase *_p_ins = (CallDataBase *)tag;
+        _p_ins->Proceed(ok);
+      }
     }
   }
 
@@ -336,16 +351,18 @@ const char *ParseCmdPara(char *argv, const char *para)
 
 int main(int argc, char **argv)
 {
-  if (argc != 5)
+  if (argc != 6)
   {
-    std::cout << "Usage:./program --thread=xx --cq=xx --pool=xx --port=xx";
+    std::cout << "Usage:./program --thread=xx --cq=xx --port=xx --variedResponse=xx --readTimeout=xx";
     return 0;
   }
 
   g_thread_num = std::atoi(ParseCmdPara(argv[1], "--thread="));
   g_cq_num = std::atoi(ParseCmdPara(argv[2], "--cq="));
-  g_pool = std::atoi(ParseCmdPara(argv[3], "--pool="));
-  g_port = std::atoi(ParseCmdPara(argv[4], "--port="));
+  g_pool = 1;
+  g_port = std::atoi(ParseCmdPara(argv[3], "--port="));
+  g_varied = ParseCmdPara(argv[4], "--variedResponse=");
+  g_readTimeout = std::atoi(ParseCmdPara(argv[5], "--readTimeout="));
 
   ServerImpl server;
   server.Run();
