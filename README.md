@@ -2,15 +2,15 @@
 An asynchronous bidirectional streaming which can even work with load balancers in place
 # Contributors
 We would like to extend our heartfelt gratitude to the following individuals who have contributed to this project. Their efforts have been invaluable to its development and success.
-# Contributors
-Name: Rajesh Sharma Subramanyan
-Role: Technical Lead
-GitHub: [Your GitHub Profile](https://github.com/reachsrajesh)
-Contributions: Initial project setup, Feature development, bug fixes, documentation
-Name: Jason P King
-Role: Core Developer
-GitHub: https://github.com/jasonpking
-Contributions: Feature development, bug fixes
+
+Name: Rajesh Sharma Subramanyan  
+Role: Technical Lead  
+GitHub: https://github.com/reachsrajesh  
+Contributions: Initial project setup, Feature development, bug fixes, documentation  
+Name: Jason P King  
+Role: Core Developer  
+GitHub: https://github.com/jasonpking  
+Contributions: Feature development, bug fixes  
 ________________________________________
 # How to Contribute
 We welcome contributions from everyone. Here are a few ways you can get involved:
