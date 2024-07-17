@@ -19,6 +19,6 @@ We welcome contributions from everyone. Here are a few ways you can get involved
 3.	Improve Documentation: Help us improve the documentation.
 4.	Suggest Features: Use GitHub Discussions or Issues to suggest new features.
 # Code of Conduct
-We expect all contributors to adhere to our [Code of Conduct](link to code of conduct). Please read it to understand the standards of behavior we expect from our community.
+We expect all contributors to adhere to our [[Code of Conduct](https://github.com/rsubramanyan/grpcHandler/blob/main/CODE-OF-CONDUCT)]. Please read it to understand the standards of behavior we expect from our community.
 # License
 This project is licensed under the [[LICENSE](https://github.com/rsubramanyan/grpcHandler/blob/main/LICENSE)]. By contributing to this project, you agree that your contributions will be licensed under its [[LICENSE](https://github.com/rsubramanyan/grpcHandler/blob/main/LICENSE)].
