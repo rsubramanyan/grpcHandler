@@ -21,4 +21,4 @@ We welcome contributions from everyone. Here are a few ways you can get involved
 # Code of Conduct
 We expect all contributors to adhere to our [Code of Conduct](link to code of conduct). Please read it to understand the standards of behavior we expect from our community.
 # License
-This project is licensed under the [License Name](link to license). By contributing to this project, you agree that your contributions will be licensed under its [License Name](link to license).
+This project is licensed under the [[LICENSE](https://github.com/rsubramanyan/grpcHandler/blob/main/LICENSE)]. By contributing to this project, you agree that your contributions will be licensed under its [[LICENSE](https://github.com/rsubramanyan/grpcHandler/blob/main/LICENSE)].
